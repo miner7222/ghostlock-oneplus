@@ -371,6 +371,7 @@ void log_slide_child_context(void);
 void disable_rseq_for_thread(void);
 int env_flag(const char *name, int def);
 int env_int_range(const char *name, int def, int min, int max);
+unsigned long env_ulong(const char *name, unsigned long def);
 long futex_op(
     uint32_t *uaddr, int op, uint32_t val,
     const struct timespec *timeout, uint32_t *uaddr2, uint32_t val3);

